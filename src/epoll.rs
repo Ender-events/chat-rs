@@ -34,9 +34,29 @@ impl Epoll {
             Ok(Epoll { fd })
         }
     }
+
     pub fn ctl_add<T: AsRawFd>(
         &self,
         stream: &T,
+        event: Events,
+        data: usize,
+    ) -> Result<(), Error> {
+        self.ctl(stream, libc::EPOLL_CTL_ADD, event, data)
+    }
+
+    pub fn ctl_mod<T: AsRawFd>(
+        &self,
+        stream: &T,
+        event: Events,
+        data: usize,
+    ) -> Result<(), Error> {
+        self.ctl(stream, libc::EPOLL_CTL_MOD, event, data)
+    }
+
+    pub fn ctl<T: AsRawFd>(
+        &self,
+        stream: &T,
+        op: i32,
         event: Events,
         data: usize,
     ) -> Result<(), Error> {
@@ -45,9 +65,7 @@ impl Epoll {
             events: event.bits(),
             u64: data as u64,
         };
-        let rv = unsafe {
-            libc::epoll_ctl(self.fd, libc::EPOLL_CTL_ADD, fd, &mut ev as *mut _)
-        };
+        let rv = unsafe { libc::epoll_ctl(self.fd, op, fd, &mut ev as *mut _) };
         if rv == -1 {
             Err(Error::last_os_error())
         } else {
