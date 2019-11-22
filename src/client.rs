@@ -1,5 +1,5 @@
-use std::cell::RefCell;
 use std::io::prelude::*;
+use std::io::IoSlice;
 use std::mem;
 use std::net::TcpStream;
 use std::rc::Rc;
@@ -10,32 +10,48 @@ const BUFFER_SIZE: usize = 512;
 
 #[derive(Clone)]
 pub struct Message {
-    user: String,
+    user: Rc<String>,
     message: Rc<VectoredData>,
     written: usize,
 }
 
 impl Message {
     pub fn write<T: Write>(&mut self, stream: &mut T) -> bool {
-        let mut msg_written = self.written;
-        let buf_index = msg_written / BUFFER_SIZE;
-        let buf_write_index = msg_written % BUFFER_SIZE;
-        let buf_end = if buf_index == self.message.data.len() - 1 {
-            self.message.data_length % BUFFER_SIZE
+        let msg_written = if self.written > self.user.len() {
+            self.written - self.user.len()
         } else {
-            BUFFER_SIZE
+            0
         };
-        let buffer =
-            &self.message.data[buf_index].borrow()[buf_write_index..buf_end];
-        let nb_write = stream.write(&buffer).unwrap();
-        msg_written += nb_write;
+
+        let buf_index = msg_written / BUFFER_SIZE;
+        let mut bufs =
+            Vec::with_capacity(1 + self.message.data.len() - buf_index);
+        if self.written < self.user.len() {
+            bufs.push(IoSlice::new(&self.user.as_bytes()[self.written..]));
+        }
+
+        for (index, buffer) in
+            self.message.data.iter().skip(buf_index).enumerate()
+        {
+            let buf_write_index = msg_written % BUFFER_SIZE;
+            let buf_end = if index == self.message.data.len() - 1 {
+                self.message.data_length % BUFFER_SIZE
+            } else {
+                BUFFER_SIZE
+            };
+            let slice = &buffer[buf_write_index..buf_end];
+            bufs.push(IoSlice::new(slice));
+        }
+
+        let nb_write = stream.write_vectored(bufs.as_slice()).unwrap();
+
         self.written += nb_write;
-        msg_written == self.message.data_length
+        self.written == self.message.data_length + self.user.len()
     }
 }
 
 struct VectoredData {
-    data: Vec<Rc<RefCell<[u8; BUFFER_SIZE]>>>,
+    data: Vec<Rc<[u8; BUFFER_SIZE]>>,
     data_length: usize,
 }
 
@@ -48,13 +64,13 @@ impl VectoredData {
     }
     pub fn read<T: Read>(&mut self, stream: &mut T) -> usize {
         if self.data.len() * BUFFER_SIZE == self.data_length {
-            self.data.push(Rc::new(RefCell::new([0; BUFFER_SIZE])));
+            self.data.push(Rc::new([0; BUFFER_SIZE]));
         }
         let buf_index = self.data_length / BUFFER_SIZE;
         let buf_read_index = self.data_length % BUFFER_SIZE;
-        let buffer =
-            &mut self.data[buf_index].borrow_mut()[buf_read_index..BUFFER_SIZE];
-        let nb_read = stream.read(buffer).unwrap();
+        let mut buffer = &mut Rc::get_mut(&mut self.data[buf_index]).unwrap()
+            [buf_read_index..BUFFER_SIZE];
+        let nb_read = stream.read(&mut buffer).unwrap();
         self.data_length += nb_read;
         nb_read
     }
@@ -63,7 +79,7 @@ impl VectoredData {
         self.data
             .iter()
             .rev()
-            .any(|buffer| buffer.borrow().iter().any(|&x| x == c))
+            .any(|buffer| buffer.iter().any(|&x| x == c))
     }
 }
 
@@ -88,7 +104,7 @@ impl Client {
     }
 
     pub fn have_message(&self) -> bool {
-        self.input.contain('\n' as u8)
+        self.input.contain(b'\n')
     }
 
     //pre(self.have_msg())
@@ -96,7 +112,7 @@ impl Client {
         let res = mem::replace(&mut self.input, VectoredData::new());
         // TODO: res can contains the beginning of the second message
         Message {
-            user: self.user.clone(),
+            user: Rc::new(self.user.clone()),
             message: Rc::new(res),
             written: 0,
         }
@@ -107,7 +123,6 @@ impl Client {
     }
 
     pub fn write(&mut self) -> bool {
-        //TODO: handle username when iovec will be used
         if self.output[0].write(&mut self.stream) {
             self.output.pop();
             self.output.is_empty()

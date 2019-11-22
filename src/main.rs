@@ -62,6 +62,8 @@ fn read_event(data: i32, epoll: &Epoll, streams: &mut ClientStorage) {
     if nb_read == 0 {
         streams.remove(&data);
         return;
+    } else if !client.have_message() {
+        return;
     }
     let msg = client.flush_input();
     for (_, client2) in
